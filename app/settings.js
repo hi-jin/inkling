@@ -7,7 +7,7 @@ const GROUPS=[
 let rec=null;
 
 function say(text,bad){keyMsg.textContent=text;keyMsg.classList.toggle('bad',!!bad)}
-function openSettings(){closeOverlays();if(cur)exitEdit();optLib.checked=libOn;say('');renderKeys();setEl.hidden=false;$('setDone').focus()}
+function openSettings(){closeOverlays();if(cur)exitEdit();optLib.checked=libOn;say('');renderKeys();setEl.hidden=false;optLib.focus()}
 function closeSettings(){stopRec();setEl.hidden=true;bd.focus({preventScroll:true})}
 setEl.addEventListener('pointerdown',ev=>{if(ev.target===setEl)closeSettings()});
 $('setDone').addEventListener('click',closeSettings);
