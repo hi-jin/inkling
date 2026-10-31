@@ -2,7 +2,11 @@
 
 I wanted to do visual thinking on my desktop the way I used to on my iPad, so I made Inkling.
 
-[![Inkling promo video](media/poster.png)](media/inkling-teaser.mp4)
+
+
+https://github.com/user-attachments/assets/35e7f75e-940a-43ed-a6e6-694d90dbff3c
+
+
 
 ## Build
 
