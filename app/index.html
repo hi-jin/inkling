@@ -21,48 +21,43 @@
   <div id="hint"></div>
 </div>
 <div id="drag"></div>
+<button type="button" id="title" hidden title="Find a note"></button>
 
-<div id="help" hidden>
+<div class="pal lib" id="lib" hidden>
+  <input id="libIn" placeholder="Find a note by any word in it" autocomplete="off" spellcheck="false">
+  <div id="libList"></div>
+  <div id="libFoot"></div>
+</div>
+
+<div class="sheet-overlay" id="help" hidden>
   <div class="card" role="dialog" aria-label="Keyboard shortcuts">
-    <header><h1>Inkling</h1><p>Write, then press <kbd>Esc</kbd> to arrange. <kbd>⌘</kbd><kbd>/</kbd> shows this again.</p></header>
-    <section class="ref">
-      <div>
-        <h2>Writing</h2>
-        <ul>
-          <li><span>Just type</span><span>Start a thought. Inkling finds free space.</span></li>
-          <li><span><kbd>Enter</kbd></span><span>Next line in a list. On an empty line, a new thought.</span></li>
-          <li><span><kbd>Tab</kbd></span><span>Next step, with an arrow. Arrows on the empty step point it.</span></li>
-          <li><span><kbd>-&gt;</kbd> name</span><span>Connect to another jot</span></li>
-          <li><span><kbd>?</kbd> <kbd>!</kbd> <kbd>~</kbd> first</span><span>Question, key point, scratched out</span></li>
-          <li><span><kbd>Esc</kbd></span><span>Done writing. The jot stays selected.</span></li>
-        </ul>
-      </div>
-      <div>
-        <h2>Selected</h2>
-        <ul>
-          <li><span><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd></span><span>Move between jots. Add <kbd>⇧</kbd> to select more.</span></li>
-          <li><span><kbd>⌥</kbd>+arrows</span><span>Move it. Add <kbd>⇧</kbd> to bring its whole group.</span></li>
-          <li><span><kbd>Enter</kbd> or type</span><span>Edit it</span></li>
-          <li><span><kbd>?</kbd> <kbd>!</kbd> <kbd>~</kbd></span><span>Mark or unmark every selected jot</span></li>
-          <li><span><kbd>⌫</kbd></span><span>Delete. <kbd>⇧</kbd><kbd>⌫</kbd> removes only its arrows.</span></li>
-          <li><span><kbd>Esc</kbd></span><span>Deselect</span></li>
-        </ul>
-      </div>
-      <div>
-        <h2>Anywhere</h2>
-        <ul>
-          <li><span><kbd>⌘</kbd><kbd>⇧</kbd><kbd>Space</kbd></span><span>Bring Inkling to the front from any app. Press again to go back.</span></li>
-          <li><span><kbd>⌘</kbd><kbd>K</kbd></span><span>Jump to a jot</span></li>
-          <li><span><kbd>⌘</kbd><kbd>=</kbd> <kbd>⌘</kbd><kbd>-</kbd></span><span>Zoom. Scroll, or hold <kbd>Space</kbd> and drag, to pan.</span></li>
-          <li><span>Click</span><span>Select. Click again to edit.</span></li>
-          <li><span>Drag empty space</span><span>Select several. Circle them, or drag a box.</span></li>
-          <li><span>Double-click</span><span>Write right there</span></li>
-          <li><span>Click an arrow</span><span>Then <kbd>⌫</kbd> to remove it</span></li>
-        </ul>
-      </div>
+    <header><h1>Inkling</h1><p id="helpSub"></p></header>
+    <section class="ref" id="helpRef"></section>
+  </div>
+</div>
+
+<div class="sheet-overlay" id="settings" hidden>
+  <div class="card" role="dialog" aria-label="Settings">
+    <header><h1>Settings</h1><button type="button" id="setDone">Done</button></header>
+    <section class="opt">
+      <h2>Notes</h2>
+      <label class="switch">
+        <input type="checkbox" id="optLib">
+        <span class="track" aria-hidden="true"></span>
+        <span class="txt"><b>Library</b><span>Keep many notes, each in its own file, and find any of them by a word inside. Turn it off to always open the same single sheet. Other notes stay saved and come back when you turn it on.</span></span>
+      </label>
+    </section>
+    <section>
+      <div class="khead"><h2>Keys</h2><span id="keyMsg" role="status"></span><button type="button" id="keysReset">Reset all</button></div>
+      <div id="keyRows"></div>
+      <p class="knote">Click a key to change it, or + to add another. <kbd>Esc</kbd> cancels.</p>
     </section>
   </div>
 </div>
+
+<script src="keymap.js"></script>
 <script src="app.js"></script>
+<script src="notes.js"></script>
+<script src="settings.js"></script>
 </body>
 </html>

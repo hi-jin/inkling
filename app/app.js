@@ -1,18 +1,40 @@
 const $=id=>document.getElementById(id);
 const bd=$('bd'),world=$('world'),mk=$('mk'),lz=$('lasso'),pop=$('pop'),pal=$('pal'),palIn=$('palIn'),palList=$('palList'),hint=$('hint'),help=$('help');
-const KEY='inkling:v1',GX=70,GY=50,LG=8,H0=33,KINDS={'?':'q','!':'imp','~':'x'},DIRS={ArrowLeft:'L',ArrowRight:'R',ArrowUp:'U',ArrowDown:'D'};
-// in the desktop app the sheet lives in a file; opened as a plain page it falls back to this browser's storage
+const GX=70,GY=50,LG=8,H0=33,PREFIX={'?':'q','!':'imp','~':'x'},DIRS={ArrowLeft:'L',ArrowRight:'R',ArrowUp:'U',ArrowDown:'D'};
 const DESK=!!window.inkling;
-const store=window.inkling||{load:async()=>{try{return JSON.parse(localStorage.getItem(KEY)||'null')}catch(_){return null}},save:t=>{try{localStorage.setItem(KEY,t)}catch(_){}},flush:t=>{try{localStorage.setItem(KEY,t)}catch(_){}}};
+const LS={get(k){try{return JSON.parse(localStorage.getItem(k)||'null')}catch(_){return null}},set(k,v){try{localStorage.setItem(k,typeof v==='string'?v:JSON.stringify(v))}catch(_){}}};
+// opened as a plain page, Inkling keeps the same notes in this browser's storage instead of files
+const store=window.inkling||{
+  platform:/Mac/.test(navigator.platform)?'darwin':'other',
+  async getSettings(){const s=LS.get('inkling:settings')||{};return{library:s.library!==false,lastNote:s.lastNote||null,keys:Keymap.merge(s.keys),summonOk:false}},
+  async setSettings(p){const s={...(LS.get('inkling:settings')||{}),...p};if(p.keys)s.keys=Keymap.diff(Keymap.merge(p.keys));LS.set('inkling:settings',s);return this.getSettings()},
+  pauseSummon(){},
+  async listNotes(){return(LS.get('inkling:notes')||[]).map(id=>LS.get('inkling:note:'+id)).filter(d=>d&&d.S).map(d=>({id:d.id,created:d.created,updated:d.updated,jots:d.S.jots}))},
+  async loadNote(id){return LS.get('inkling:note:'+id)},
+  saveNote(id,t){LS.set('inkling:note:'+id,t);const ids=LS.get('inkling:notes')||[];if(!ids.includes(id))LS.set('inkling:notes',[...ids,id])},
+  flushNote(id,t){this.saveNote(id,t)},
+  async removeNote(id){LS.set('inkling:notes',(LS.get('inkling:notes')||[]).filter(x=>x!==id));try{localStorage.removeItem('inkling:note:'+id)}catch(_){}},
+  onCommand(){}
+};
+const MAC=store.platform==='darwin';
 if(DESK)document.documentElement.classList.add('desk');
 const clamp=(x,a,b)=>x<a?a:x>b?b:x;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let S={jots:[],links:[]},nid=1,hist=[],fut=[],cur=null,lastFocus=null,prevFocus=null,lastDir='R',cam={x:-60,y:-40,z:1};
-let sel=new Set(),anchor=null,selArrow=null,palResume=null,booted=false,saveT=0;
+let sel=new Set(),anchor=null,selArrow=null,palResume=null,booted=false,saveT=0,libOn=true,summonOk=false;
 let popState=null,palSel=0,palItems=[],drag=null,pan=null,lasso=null,nudgeT=0,editStart=null,spaceDown=false,lastDown={t:0,x:0,y:0};
 const els=new Map(),SZ=new Map(),FRESH=new Set(),SHIFT=new Map(),GONE=new Set();
 
-function save(){if(!booted)return;clearTimeout(saveT);saveT=setTimeout(()=>store.save(JSON.stringify({S,cam})),250)}
-addEventListener('beforeunload',()=>{if(!booted)return;clearTimeout(saveT);store.flush(JSON.stringify({S,cam}))});
+// keys: action -> bindings, and the reverse index the key handlers read
+let KM=Keymap.defaults(),KIDX=new Map();
+function reindex(){KIDX=new Map();for(const[id,bs]of Object.entries(KM))for(const b of bs){if(!KIDX.has(b))KIDX.set(b,[]);KIDX.get(b).push(id)}}
+const CTX=id=>Keymap.BY_ID[id].ctx;
+function keyActs(ev){const c=Keymap.combo(ev,MAC);if(!c)return{c:null,acts:[]};return{c,acts:[...(KIDX.get(c.exact)||[]),...(c.family?KIDX.get(c.family)||[]:[])]}}
+const kd=id=>`<kbd>${esc(Keymap.show((KM[id]||[])[0]||'',MAC))}</kbd>`;
+reindex();
+
+function save(content=true){if(!booted||!note.id)return;if(content)note.dirty=true;clearTimeout(saveT);saveT=setTimeout(writeNote,250);if(content)showTitle()}
+addEventListener('beforeunload',()=>{if(booted)flushNote()});
 function pushHist(s){hist.push(s);if(hist.length>150)hist.shift();fut=[]}
 function snap(){pushHist(JSON.stringify(S))}
 const byId=id=>id?S.jots.find(j=>j.id===id&&!GONE.has(j.id)):null;
@@ -34,8 +56,9 @@ function makeEl(j){
   e.addEventListener('focus',()=>{e.classList.add('editing');if(cur===j)return;if(lastFocus!==j.id)prevFocus=lastFocus;cur=j;lastFocus=j.id;sel=new Set([j.id]);anchor=j.id;selArrow=null;editStart={text:j.text,kind:j.kind,snap:JSON.stringify(S)};drawMarks();updateHint()});
   e.addEventListener('blur',()=>onBlur(j,e));
   e.addEventListener('input',()=>onInput(j,e));
+  // Enter arrives here rather than as a keydown, so Korean and other input sources finish their syllable first
   e.addEventListener('beforeinput',ev=>{const t=ev.inputType;
-    if(t==='insertParagraph'||t==='insertLineBreak'){ev.preventDefault();if(popState){confirmPop();return}doEnter(j,e)}
+    if(t==='insertParagraph'||t==='insertLineBreak'){if(popState){ev.preventDefault();confirmPop();return}if(KM.list.includes('Enter')||(t==='insertLineBreak'&&KM.list.includes('Shift+Enter'))){ev.preventDefault();doEnter(j,e)}}
     else if(t==='deleteContentBackward'&&!e.textContent){ev.preventDefault();doBackspace(j,e)}});
   e.addEventListener('keydown',ev=>onKey(ev,j,e));
   return e;
@@ -67,7 +90,7 @@ function commit(j){if(!j||!editStart||cur!==j)return;if(j.text!==editStart.text|
 function onInput(j,e){
   if(e.textContent==='')e.innerHTML='';
   const m=e.textContent.match(/^([?!~]) /);
-  if(m){const off=caretOff(e);e.textContent=e.textContent.slice(2);setKind(j,KINDS[m[1]]);setCaret(e,Math.max(0,off-2))}
+  if(m){const off=caretOff(e);e.textContent=e.textContent.slice(2);setKind(j,PREFIX[m[1]]);setCaret(e,Math.max(0,off-2))}
   j.text=e.textContent;place(j);drawMarks();updatePop(j);updateHint();save();
 }
 function onBlur(j,e){
@@ -103,7 +126,7 @@ function freeSpot(near){
   const ok=(x,y)=>!rs.some(r=>x<r.r+pad&&x+W>r.l-pad&&y-H0/2<r.b+pad&&y+H0/2>r.t-pad);
   let bx,by;
   if(near&&byId(near.id)&&near.text){const c=cluster(near).map(rect);bx=Math.min(...c.map(r=>r.l));by=Math.max(...c.map(r=>r.b))+64}
-  else{bx=cam.x+70/cam.z;by=cam.y+60/cam.z}
+  else{bx=cam.x+70/cam.z;by=cam.y+(DESK?110:60)/cam.z}
   for(let k=0;k<80;k++){const y=by+k*46;if(ok(bx,y))return{x:bx,y}}
   return{x:bx,y:by};
 }
@@ -146,7 +169,9 @@ function nudgeSel(dir,group){
   const m=new Map();for(const j of base)for(const o of group?cluster(j):[j])m.set(o.id,o);
   for(const o of m.values()){o.x+=dx;o.y+=dy;place(o)}drawMarks();ensureVisible(byId(anchor)||base[0]);save();
 }
-function toggleKind(kind){const js=[...sel].map(byId).filter(Boolean);if(!js.length)return;snap();const all=js.every(j=>j.kind===kind);for(const j of js)setKind(j,all?'':kind);drawMarks();save();updateHint()}
+// the ? badge sits inside the jot's left edge; growing it leftward keeps the words where they were
+function keepKind(j,kind){const w0=rect(j).w;setKind(j,kind);j.x-=(rect(j).w-w0)*(1-j.ax);place(j)}
+function toggleKind(kind){const js=[...sel].map(byId).filter(Boolean);if(!js.length)return;snap();const all=js.every(j=>j.kind===kind);for(const j of js)keepKind(j,all?'':kind);drawMarks();save();updateHint()}
 function collapse(j){const listy=j.via==='list'||S.jots.some(o=>o.parent===j.id&&o.via==='list');if(!listy)return;
   const r=rect(j),cl=new Set(cluster(j).map(o=>o.id)),dy=r.h+LG;
   for(const o of live()){if(o===j||!cl.has(o.id))continue;const q=rect(o);if(q.t>=r.b-2&&q.l<r.r+20&&q.r>r.l-20){o.y-=dy;place(o)}}}
@@ -177,12 +202,15 @@ function onKey(ev,j,e){
     if(k==='Tab'){ev.preventDefault();confirmPop();return}
     if(k==='Escape'){ev.preventDefault();closePop();updateHint();return}
   }
-  if(k==='Tab'){ev.preventDefault();if(ime)return;if(ev.shiftKey){const p=byId(j.parent);if(p){commit(j);editJot(p,'end')}}else doTab(j);return}
+  const{c,acts}=keyActs(ev),A=a=>acts.includes(a);
+  if(A('step')){ev.preventDefault();if(!ime)doTab(j);return}
+  if(A('stepBack')){ev.preventDefault();if(!ime){const p=byId(j.parent);if(p){commit(j);editJot(p,'end')}}return}
   if(ime)return;
-  if(k==='Escape'){ev.preventDefault();exitEdit();return}
+  if(A('done')){ev.preventDefault();exitEdit();return}
+  if(A('list')&&c.exact!=='Enter'&&c.exact!=='Shift+Enter'){ev.preventDefault();doEnter(j,e);return}
   // while writing, arrows only move the caret; an empty step is the one place they point the arrow instead
   if(DIRS[k]&&!ev.altKey&&!ev.metaKey&&!ev.ctrlKey&&!ev.shiftKey&&!e.textContent&&j.via==='step'){ev.preventDefault();redirect(j,DIRS[k]);return}
-  if(k==='Backspace'&&j.kind&&caretOff(e)===0&&getSelection().isCollapsed&&e.textContent){ev.preventDefault();commit(j);setKind(j,'');drawMarks();updateHint();save();return}
+  if(k==='Backspace'&&j.kind&&caretOff(e)===0&&getSelection().isCollapsed&&e.textContent){ev.preventDefault();commit(j);keepKind(j,'');drawMarks();updateHint();save();return}
 }
 
 function updatePop(j){
@@ -210,7 +238,7 @@ function confirmPop(){
   drawMarks();editJot(from,'end');save();
 }
 
-function openPal(){closeHelp();palResume=cur?cur.id:null;pal.hidden=false;palIn.value='';palSel=0;renderPal();palIn.focus()}
+function openPal(){closeOverlays();palResume=cur?cur.id:null;pal.hidden=false;palIn.value='';palSel=0;renderPal();palIn.focus()}
 function closePal(back){pal.hidden=true;const j=byId(palResume);palResume=null;if(back&&j)editJot(j,'end');else bd.focus({preventScroll:true})}
 function renderPal(){
   const q=palIn.value.trim().toLowerCase();
@@ -228,9 +256,10 @@ palIn.addEventListener('keydown',ev=>{
 });
 palIn.addEventListener('blur',()=>{setTimeout(()=>{if(document.activeElement!==palIn)pal.hidden=true},0)});
 
-function openHelp(){if(cur)exitEdit();pal.hidden=true;help.hidden=false;bd.focus({preventScroll:true})}
+function openHelp(){closeOverlays();if(cur)exitEdit();renderHelp();help.hidden=false;bd.focus({preventScroll:true})}
 function closeHelp(){help.hidden=true}
 help.addEventListener('pointerdown',ev=>{if(ev.target===help)closeHelp()});
+function closeOverlays(){closeHelp();pal.hidden=true;lib.hidden=true;if(!setEl.hidden)closeSettings()}
 
 function edge(r,to,gap){const dx=to.x-r.cx,dy=to.y-r.cy;const t=Math.min(dx?(r.w/2+gap)/Math.abs(dx):1e9,dy?(r.h/2+gap)/Math.abs(dy):1e9);return{x:r.cx+dx*t,y:r.cy+dy*t}}
 const f2=p=>p.x.toFixed(1)+' '+p.y.toFixed(1);
@@ -256,7 +285,7 @@ function drawMarks(){
 }
 
 function applyCam(anim){world.style.transition=anim?'transform .28s cubic-bezier(.2,.7,.2,1)':'none';world.style.transform=`scale(${cam.z}) translate(${-cam.x}px,${-cam.y}px)`;
-  const g=22*cam.z;bd.style.backgroundSize=`${g}px ${g}px`;bd.style.backgroundPosition=`${-cam.x*cam.z}px ${-cam.y*cam.z}px`;save()}
+  const g=22*cam.z;bd.style.backgroundSize=`${g}px ${g}px`;bd.style.backgroundPosition=`${-cam.x*cam.z}px ${-cam.y*cam.z}px`;save(false)}
 function ensureVisible(j){if(!j)return;const r=rect(j),W=bd.clientWidth,H=bd.clientHeight,z=cam.z,m=60,mt=DESK?76:60,mb=96;let nx=cam.x,ny=cam.y;
   if((r.l-cam.x)*z<m)nx=r.l-m/z;else if((r.r-cam.x)*z>W-m)nx=r.r-(W-m)/z;
   if((r.t-cam.y)*z<mt)ny=r.t-mt/z;else if((r.b-cam.y)*z>H-mb)ny=r.b-(H-mb)/z;
@@ -266,52 +295,62 @@ function zoomBy(f){const W=bd.clientWidth/2,H=bd.clientHeight/2,wx=cam.x+W/cam.z
 function updateHint(){
   const K=(k,t)=>`<span>${k} ${t}</span>`,M=t=>`<span class="mode">${t}</span>`,n=sel.size,ar=n?arrowsFor([...sel]).length:0,arTxt=a=>`${a} arrow${a>1?'s':''}`;let h;
   if(popState)h=M('Connecting')+K('<kbd>↑</kbd><kbd>↓</kbd>','choose')+K('<kbd>Enter</kbd>','connect')+K('<kbd>Esc</kbd>','cancel');
-  else if(cur&&!cur.text&&cur.via==='step')h=M('Writing')+K('<kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd>','point this step')+K('type','to keep it here')+K('<kbd>Esc</kbd>','cancel');
-  else if(cur&&!cur.text)h=M('Writing')+K('<kbd>Enter</kbd>','again for a new thought')+K('<kbd>Esc</kbd>','cancel');
-  else if(cur)h=M('Writing')+K('<kbd>Enter</kbd>','list')+K('<kbd>Tab</kbd>','next step')+K('<kbd>-&gt;</kbd>','connect')+K('<kbd>?</kbd><kbd>!</kbd><kbd>~</kbd>','at the start')+K('<kbd>Esc</kbd>','done');
-  else if(selArrow)h=M('Arrow')+K('<kbd>⌫</kbd>','remove it')+K('<kbd>Esc</kbd>','deselect');
-  else if(n>1)h=M(n+' selected')+K('<kbd>⌥</kbd>+arrows','move together')+K('<kbd>?</kbd><kbd>!</kbd><kbd>~</kbd>','mark all')+K('<kbd>⌫</kbd>','delete')+(ar?K('<kbd>⇧⌫</kbd>','remove '+arTxt(ar)+' between'):'')+K('<kbd>Esc</kbd>','deselect');
-  else if(n===1)h=M('Selected')+K('<kbd>Enter</kbd>','edit')+K('<kbd>Tab</kbd>','next step')+K('<kbd>⇧</kbd>+arrows','select more')+K('<kbd>⌥</kbd>+arrows','move')+K('<kbd>⌫</kbd>','delete')+(ar?K('<kbd>⇧⌫</kbd>','remove '+arTxt(ar)):'');
-  else h=K('Just type','to start a thought')+K('<kbd>↑↓←→</kbd>','pick a jot')+K('Drag','to select')+K('Double-click','to write there')+K('<kbd>⌘K</kbd>','jump')+K('<kbd>⌘/</kbd>','all keys');
+  else if(cur&&!cur.text&&cur.via==='step')h=M('Writing')+K('<kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd>','point this step')+K('type','to keep it here')+K(kd('done'),'cancel');
+  else if(cur&&!cur.text)h=M('Writing')+K(kd('list'),'again for a new thought')+K(kd('done'),'cancel');
+  else if(cur)h=M('Writing')+K(kd('list'),'list')+K(kd('step'),'next step')+K('<kbd>-&gt;</kbd>','connect')+K('<kbd>?</kbd><kbd>!</kbd><kbd>~</kbd>','at the start')+K(kd('done'),'done');
+  else if(selArrow)h=M('Arrow')+K(kd('delete'),'remove it')+K(kd('deselect'),'deselect');
+  else if(n>1)h=M(n+' selected')+K(kd('move'),'move together')+K(kd('markQ')+kd('markImp')+kd('markX'),'mark all')+K(kd('delete'),'delete')+(ar?K(kd('unlink'),'remove '+arTxt(ar)+' between'):'')+K(kd('deselect'),'deselect');
+  else if(n===1)h=M('Selected')+K(kd('edit'),'edit')+K(kd('step'),'next step')+K(kd('extend'),'select more')+K(kd('move'),'move')+K(kd('delete'),'delete')+(ar?K(kd('unlink'),'remove '+arTxt(ar)):'');
+  else h=K('Just type','to start a thought')+K(kd('walk'),'pick a jot')+(libOn?K(kd('library'),'notes'):'')+K(kd('jump'),'jump')+K(kd('help'),'all keys');
   hint.innerHTML=h;
 }
 
-// commands that the desktop menu sends; in a plain browser the same keys call them directly
+// commands come from keys and from the desktop menu
 function run(cmd){
+  const ae=document.activeElement,field=ae&&ae.tagName==='INPUT';
+  if(field&&(cmd==='undo'||cmd==='redo')){document.execCommand(cmd);return}
+  if(field&&cmd==='selectAll'){ae.select();return}
   if(cmd==='undo'){if(cur)document.execCommand('undo');else undo()}
   else if(cmd==='redo'){if(cur)document.execCommand('redo');else redo()}
-  else if(cmd==='selectAll'){if(!pal.hidden&&document.activeElement===palIn)palIn.select();else if(cur){const r=document.createRange();r.selectNodeContents(els.get(cur.id));const s=getSelection();s.removeAllRanges();s.addRange(r)}else setSel(live().map(j=>j.id))}
+  else if(cmd==='selectAll'){if(cur){const r=document.createRange();r.selectNodeContents(els.get(cur.id));const s=getSelection();s.removeAllRanges();s.addRange(r)}else setSel(live().map(j=>j.id))}
   else if(cmd==='zoomIn')zoomBy(1.2);
   else if(cmd==='zoomOut')zoomBy(1/1.2);
   else if(cmd==='zoomReset')zoomBy('reset');
   else if(cmd==='jump')openPal();
   else if(cmd==='help'){if(help.hidden)openHelp();else closeHelp()}
-  else if(cmd==='example'){closeHelp();stopWriting();snap();seed();save();bd.focus({preventScroll:true})}
-  else if(cmd==='clear'){closeHelp();stopWriting();snap();S={jots:[],links:[]};sel.clear();renderAll();lastFocus=null;save();bd.focus({preventScroll:true})}
-  else if(cmd==='summon'){closeHelp();if(!cur){pal.hidden=true;setSel([]);bd.focus({preventScroll:true})}}
+  else if(cmd==='settings'){if(setEl.hidden)openSettings();else closeSettings()}
+  else if(cmd==='library'){if(!libOn)return;if(lib.hidden)openLib();else closeLib()}
+  else if(cmd==='newNote'){if(!libOn)return;closeOverlays();newNote('')}
+  else if(cmd==='example')loadExample();
+  else if(cmd==='clear'){closeOverlays();stopWriting();snap();S={jots:[],links:[]};sel.clear();renderAll();lastFocus=null;save();bd.focus({preventScroll:true})}
+  else if(cmd==='summon'){closeOverlays();if(!cur){setSel([]);bd.focus({preventScroll:true})}}
 }
-if(DESK)window.inkling.onCommand(run);
-const MENU_KEYS={KeyK:'jump',KeyZ:'undo',KeyA:'selectAll',Equal:'zoomIn',Minus:'zoomOut',Digit0:'zoomReset',Slash:'help'};
+store.onCommand(run);
 
 document.addEventListener('keydown',ev=>{
-  const mod=ev.metaKey||ev.ctrlKey,t=ev.target,k=ev.key;
-  if(mod&&MENU_KEYS[ev.code]){if(DESK)return;ev.preventDefault();run(ev.code==='KeyZ'&&ev.shiftKey?'redo':MENU_KEYS[ev.code]);return}
+  if(ev.isComposing)return;
+  const t=ev.target,k=ev.key,{c,acts}=keyActs(ev),A=a=>acts.includes(a);
+  const g=acts.find(a=>CTX(a)==='global'&&(libOn||!Keymap.BY_ID[a].lib));
+  if(g){ev.preventDefault();run(g);return}
   if(!help.hidden){if(k==='Escape'||k==='Enter'){ev.preventDefault();closeHelp()}return}
-  if(isJot(t)||t===palIn)return;
+  if(!setEl.hidden){if(k==='Escape'){ev.preventDefault();closeSettings()}return}
+  if(!lib.hidden||isJot(t)||t===palIn)return;
   if(t.tagName==='BUTTON'&&(k==='Enter'||k===' '))return;
   if(k===' '){ev.preventDefault();spaceDown=true;bd.classList.add('space');return}
   const has=sel.size>0&&!!byId(anchor);
-  if(selArrow&&(k==='Backspace'||k==='Delete')){ev.preventDefault();removeArrows([selArrow]);return}
-  if(has&&(k==='Backspace'||k==='Delete')){ev.preventDefault();if(ev.shiftKey)removeArrows(arrowsFor([...sel]));else deleteSel();return}
-  if(mod)return;
-  if(k==='Escape'){if(has||selArrow){ev.preventDefault();setSel([])}return}
-  if(DIRS[k]){ev.preventDefault();const dir=DIRS[k];
+  if(selArrow&&A('delete')){ev.preventDefault();removeArrows([selArrow]);return}
+  if(has&&A('unlink')){ev.preventDefault();removeArrows(arrowsFor([...sel]));return}
+  if(has&&A('delete')){ev.preventDefault();deleteSel();return}
+  if(A('deselect')){if(has||selArrow){ev.preventDefault();setSel([])}return}
+  if(c&&c.dir){const f=['walk','extend','move','moveGroup'].find(A);if(!f)return;ev.preventDefault();
     if(!has){const j=byId(lastFocus)||live().pop();if(j){setSel([j.id]);ensureVisible(j)}return}
-    if(ev.altKey)nudgeSel(dir,ev.shiftKey);else if(ev.shiftKey)extendSel(dir);else moveSel(dir);return}
-  if(ev.altKey)return;
-  if(k==='Tab'&&has){ev.preventDefault();if(ev.shiftKey){const p=byId(byId(anchor).parent);if(p)setSel([p.id])}else doTab(byId(anchor));return}
-  if(k==='Enter'){ev.preventDefault();if(has)editJot(byId(anchor),'end');else newThought(byId(lastFocus));return}
-  if(has&&KINDS[k]){ev.preventDefault();toggleKind(KINDS[k]);return}
+    if(f==='walk')moveSel(c.dir);else if(f==='extend')extendSel(c.dir);else nudgeSel(c.dir,f==='moveGroup');return}
+  if(has&&A('step')){ev.preventDefault();doTab(byId(anchor));return}
+  if(has&&A('stepBack')){ev.preventDefault();const p=byId(byId(anchor).parent);if(p)setSel([p.id]);return}
+  if(A('edit')){ev.preventDefault();if(has)editJot(byId(anchor),'end');else newThought(byId(lastFocus));return}
+  const mark=A('markQ')?'q':A('markImp')?'imp':A('markX')?'x':null;
+  if(has&&mark){ev.preventDefault();toggleKind(mark);return}
+  if(ev.metaKey||ev.ctrlKey||ev.altKey)return;
   if(k.length===1||k==='Process'||ev.keyCode===229){if(has)editJot(byId(anchor),'end');else newThought(byId(lastFocus))}
 });
 document.addEventListener('keyup',ev=>{if(ev.key===' '){spaceDown=false;bd.classList.remove('space')}});
@@ -388,16 +427,28 @@ function seed(){
   const t1=add({text:'tokens',x:60,y:250});const t2=step(t1,'R','embed');const t3=step(t2,'R','add position','imp');
   const t4=step(t3,'D','attention ×6');step(t4,'L','output');
   S.links.push({from:t3.id,to:b.id});
-  cam={x:-60,y:DESK?-80:-50,z:1};hist=[];fut=[];lastFocus=null;lastDir='R';drawMarks();applyCam(false);updateHint();
+  cam={x:-60,y:DESK?-80:-50,z:1};lastFocus=null;lastDir='R';drawMarks();applyCam(false);updateHint();
 }
+async function loadExample(){closeOverlays();stopWriting();if(libOn&&filled().length)await newNote('');snap();seed();save();bd.focus({preventScroll:true})}
 
 async function boot(){
-  let saved=null;try{saved=await store.load()}catch(_){}
+  let st=null,list=[];
+  try{st=await store.getSettings()}catch(_){}
+  if(st){KM=Keymap.merge(st.keys);libOn=st.library!==false;summonOk=!!st.summonOk}
+  reindex();
+  try{list=await store.listNotes()}catch(_){}
   booted=true;
-  if(saved&&saved.S&&Array.isArray(saved.S.jots)){S=saved.S;if(saved.cam)cam=saved.cam;renderAll()}
-  else{seed();save();openHelp()}
-  bd.focus({preventScroll:true});
+  const recent=list.slice().sort((a,b)=>b.updated-a.updated)[0];
+  const pick=st&&st.lastNote&&list.some(n=>n.id===st.lastNote)?st.lastNote:recent&&recent.id;
+  if(!(pick&&await openNote(pick))){
+    note={id:newId(),created:Date.now(),updated:Date.now(),saved:false,dirty:true};
+    seed();hist=[];fut=[];save();store.setSettings({lastNote:note.id});openHelp();
+  }
+  showTitle();updateHint();if(help.hidden)bd.focus({preventScroll:true});
   window.__ready=true;
 }
-(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(boot);
+// sizes are measured from the rendered text, so the handwriting font has to be in before the first jot appears
+const fontsIn=document.fonts?Promise.all(['400 22px Kalam','700 22px Kalam','400 13px "IBM Plex Sans"'].map(f=>document.fonts.load(f).catch(()=>{}))):Promise.resolve();
+document.addEventListener('DOMContentLoaded',()=>fontsIn.then(boot));
+if(document.fonts)document.fonts.addEventListener('loadingdone',()=>{if(!booted)return;for(const j of S.jots)place(j);drawMarks()});
 addEventListener('resize',()=>{drawMarks()});

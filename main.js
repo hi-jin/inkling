@@ -1,35 +1,81 @@
 const { app, BrowserWindow, Menu, dialog, globalShortcut, ipcMain, nativeTheme, shell } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
+const Keymap = require('./app/keymap.js');
 
 const isMac = process.platform === 'darwin';
-const DEFAULTS = { summon: 'CommandOrControl+Shift+Space' };
+const NOTE_ID = /^n[a-z0-9]{4,40}$/;
 let win = null;
 let quitting = false;
 let boundsTimer = null;
+let prefs = null;
+let summonKey = null;
+let summonOk = false;
+let summonPaused = false;
 
-const dataPath = (name) => path.join(app.getPath('userData'), name);
+const dataPath = (...parts) => path.join(app.getPath('userData'), ...parts);
+const notesDir = () => dataPath('notes');
 
-function readJSON(name, fallback) {
+function readJSON(file, fallback) {
   try {
-    return JSON.parse(fs.readFileSync(dataPath(name), 'utf8'));
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
     return fallback;
   }
 }
 
-// write to a temp file first so a crash mid-write never leaves a half sheet behind
-function writeText(name, text) {
-  fs.mkdirSync(app.getPath('userData'), { recursive: true });
-  const target = dataPath(name);
-  fs.writeFileSync(target + '.tmp', text);
-  fs.renameSync(target + '.tmp', target);
+// write to a temp file first so a crash mid-write never leaves a half note behind
+function writeText(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + '.tmp', text);
+  fs.renameSync(file + '.tmp', file);
 }
 
-function settings() {
-  const saved = readJSON('settings.json', null);
-  if (!saved) writeText('settings.json', JSON.stringify(DEFAULTS, null, 2) + '\n');
-  return { ...DEFAULTS, ...saved };
+function notePath(id) {
+  if (!NOTE_ID.test(String(id))) throw new Error(`bad note id: ${id}`);
+  return path.join(notesDir(), id + '.json');
+}
+
+function noteFiles() {
+  try {
+    return fs.readdirSync(notesDir()).filter((n) => n.endsWith('.json'));
+  } catch {
+    return [];
+  }
+}
+
+function loadPrefs() {
+  const raw = readJSON(dataPath('settings.json'), {}) || {};
+  const keys = { ...(raw.keys || {}) };
+  if (raw.summon && !keys.summon) {
+    const b = Keymap.fromAccel(raw.summon);
+    if (b) keys.summon = [b];
+  }
+  prefs = {
+    keys: Keymap.merge(keys),
+    library: raw.library !== false,
+    lastNote: typeof raw.lastNote === 'string' && NOTE_ID.test(raw.lastNote) ? raw.lastNote : null,
+  };
+}
+
+function savePrefs() {
+  const out = { keys: Keymap.diff(prefs.keys), library: prefs.library, lastNote: prefs.lastNote };
+  writeText(dataPath('settings.json'), JSON.stringify(out, null, 2) + '\n');
+}
+
+// 0.1.0 kept one sheet in sheet.json; it becomes the first note
+function migrate() {
+  const old = dataPath('sheet.json');
+  if (!fs.existsSync(old)) return;
+  const d = readJSON(old, null);
+  if (!noteFiles().length && d && d.S && Array.isArray(d.S.jots)) {
+    const id = 'n' + Date.now().toString(36);
+    const now = Date.now();
+    writeText(notePath(id), JSON.stringify({ id, created: now, updated: now, S: d.S, cam: d.cam }));
+    prefs.lastNote = id;
+    savePrefs();
+  }
+  fs.renameSync(old, dataPath('sheet-0.1.json'));
 }
 
 function send(cmd) {
@@ -39,7 +85,7 @@ function send(cmd) {
 }
 
 function createWindow() {
-  const bounds = readJSON('window.json', { width: 1200, height: 800 });
+  const bounds = readJSON(dataPath('window.json'), { width: 1200, height: 800 });
   win = new BrowserWindow({
     ...bounds,
     minWidth: 560,
@@ -64,7 +110,7 @@ function createWindow() {
   const keepBounds = () => {
     clearTimeout(boundsTimer);
     boundsTimer = setTimeout(() => {
-      if (win && !win.isDestroyed() && !win.isFullScreen()) writeText('window.json', JSON.stringify(win.getBounds()));
+      if (win && !win.isDestroyed() && !win.isFullScreen()) writeText(dataPath('window.json'), JSON.stringify(win.getBounds()));
     }, 400);
   };
   win.on('resize', keepBounds);
@@ -99,16 +145,19 @@ function summon() {
   win.webContents.send('command', 'summon');
 }
 
-function registerSummon() {
-  const accel = settings().summon;
+function registerSummon(binding) {
+  if (summonKey) globalShortcut.unregister(summonKey);
+  summonKey = null;
+  const acc = Keymap.accel(binding);
   let ok = false;
   try {
-    ok = globalShortcut.register(accel, summon);
+    ok = !!acc && globalShortcut.register(acc, summon);
   } catch {
     ok = false;
   }
-  console.log(`[inkling] summon ${accel}: ${ok ? 'registered' : 'unavailable'}`);
-  return { accel, ok };
+  if (ok) summonKey = acc;
+  console.log(`[inkling] summon ${acc || binding}: ${ok ? 'registered' : 'unavailable'}`);
+  return ok;
 }
 
 async function confirmClear() {
@@ -117,33 +166,50 @@ async function confirmClear() {
     buttons: ['Clear', 'Cancel'],
     defaultId: 1,
     cancelId: 1,
-    message: 'Clear the whole sheet?',
-    detail: 'You can still undo it with ⌘Z.',
+    message: 'Clear this note?',
+    detail: 'You can still undo it.',
   });
   if (response === 0) send('clear');
 }
 
-const pretty = (accel) =>
-  accel
-    .replace(/CommandOrControl|CmdOrCtrl/g, isMac ? '⌘' : 'Ctrl')
-    .replace(/Command|Cmd/g, '⌘')
-    .replace(/Shift/g, isMac ? '⇧' : 'Shift')
-    .replace(/Alt|Option/g, isMac ? '⌥' : 'Alt')
-    .replace(/Control|Ctrl/g, isMac ? '⌃' : 'Ctrl')
-    .replace(/\+/g, isMac ? '' : '+');
-
-function buildMenu(summonState) {
-  // the page reads these keys itself, so the menu only shows them and relays clicks
-  const item = (label, accelerator, cmd) => ({ label, accelerator, registerAccelerator: false, click: () => send(cmd) });
+function buildMenu() {
+  const keys = prefs.keys;
+  const lib = prefs.library;
+  // the window reads every key itself, so menu items only show their keys and relay clicks
+  const item = (label, id) => ({
+    label,
+    accelerator: Keymap.accel((keys[id] || [])[0] || '') || undefined,
+    registerAccelerator: false,
+    click: () => send(id),
+  });
+  const summonLabel = `${Keymap.show(keys.summon[0], isMac)}`;
   const template = [
-    ...(isMac ? [{ role: 'appMenu' }] : []),
+    ...(isMac
+      ? [{
+          label: app.name,
+          submenu: [
+            { role: 'about' },
+            { type: 'separator' },
+            item('Settings…', 'settings'),
+            { type: 'separator' },
+            { role: 'services' },
+            { type: 'separator' },
+            { role: 'hide' },
+            { role: 'hideOthers' },
+            { role: 'unhide' },
+            { type: 'separator' },
+            { role: 'quit' },
+          ],
+        }]
+      : []),
     {
       label: 'File',
       submenu: [
-        { label: 'Clear Sheet…', click: confirmClear },
+        ...(lib ? [item('New Note', 'newNote'), item('Find a Note…', 'library'), { type: 'separator' }] : []),
+        { label: 'Clear This Note…', click: confirmClear },
         { type: 'separator' },
         { label: 'Show Data Folder', click: () => shell.openPath(app.getPath('userData')) },
-        { label: 'Edit Settings…', click: () => shell.openPath(dataPath('settings.json')) },
+        ...(isMac ? [] : [item('Settings…', 'settings')]),
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
@@ -151,23 +217,23 @@ function buildMenu(summonState) {
     {
       label: 'Edit',
       submenu: [
-        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => send('undo') },
-        { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('redo') },
+        item('Undo', 'undo'),
+        item('Redo', 'redo'),
         { type: 'separator' },
         { role: 'cut' },
         { role: 'copy' },
         { role: 'paste' },
-        { label: 'Select All', accelerator: 'CmdOrCtrl+A', click: () => send('selectAll') },
+        item('Select All', 'selectAll'),
       ],
     },
     {
       label: 'View',
       submenu: [
-        { label: 'Jump to a Jot…', accelerator: 'CmdOrCtrl+K', click: () => send('jump') },
+        item('Jump to a Jot…', 'jump'),
         { type: 'separator' },
-        { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => send('zoomIn') },
-        { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => send('zoomOut') },
-        { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: () => send('zoomReset') },
+        item('Zoom In', 'zoomIn'),
+        item('Zoom Out', 'zoomOut'),
+        item('Actual Size', 'zoomReset'),
         { type: 'separator' },
         { role: 'togglefullscreen' },
         ...(app.isPackaged ? [] : [{ role: 'toggleDevTools' }]),
@@ -177,13 +243,11 @@ function buildMenu(summonState) {
     {
       role: 'help',
       submenu: [
-        { label: 'Keyboard Shortcuts', accelerator: 'CmdOrCtrl+/', click: () => send('help') },
-        { label: 'Load Example Sheet', click: () => send('example') },
+        item('Keyboard Shortcuts', 'help'),
+        { label: lib ? 'Open Example Note' : 'Load Example Sheet', click: () => send('example') },
         { type: 'separator' },
         {
-          label: summonState.ok
-            ? `Summon from anywhere: ${pretty(summonState.accel)}`
-            : `Summon shortcut ${pretty(summonState.accel)} is taken. Edit Settings to change it.`,
+          label: summonOk ? `Summon from anywhere: ${summonLabel}` : `Summon shortcut ${summonLabel} is taken. Change it in Settings.`,
           enabled: false,
         },
       ],
@@ -192,11 +256,66 @@ function buildMenu(summonState) {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-ipcMain.handle('sheet:load', () => readJSON('sheet.json', null));
-ipcMain.on('sheet:save', (_e, text) => writeText('sheet.json', text));
-ipcMain.on('sheet:flush', (e, text) => {
-  writeText('sheet.json', text);
-  e.returnValue = true;
+ipcMain.handle('settings:get', () => ({ ...prefs, summonOk }));
+ipcMain.handle('settings:set', (_e, patch = {}) => {
+  let summonTaken = false;
+  if (patch.keys) {
+    const prev = prefs.keys.summon[0];
+    prefs.keys = Keymap.merge(patch.keys);
+    summonPaused = false;
+    summonOk = registerSummon(prefs.keys.summon[0]);
+    if (!summonOk && prefs.keys.summon[0] !== prev) {
+      summonTaken = true;
+      prefs.keys.summon = [prev];
+      summonOk = registerSummon(prev);
+    }
+  }
+  if (typeof patch.library === 'boolean') prefs.library = patch.library;
+  if (patch.lastNote === null || (typeof patch.lastNote === 'string' && NOTE_ID.test(patch.lastNote))) prefs.lastNote = patch.lastNote;
+  savePrefs();
+  if (patch.keys || typeof patch.library === 'boolean') buildMenu();
+  return { ...prefs, summonOk, summonTaken };
+});
+// while the summon key is being re-recorded, pressing the old one must not hide the window
+ipcMain.on('summon:pause', (_e, on) => {
+  if (on && !summonPaused) {
+    summonPaused = true;
+    if (summonKey) globalShortcut.unregister(summonKey);
+    summonKey = null;
+  } else if (!on && summonPaused) {
+    summonPaused = false;
+    summonOk = registerSummon(prefs.keys.summon[0]);
+  }
+});
+
+ipcMain.handle('notes:list', () =>
+  noteFiles()
+    .map((n) => readJSON(path.join(notesDir(), n), null))
+    .filter((d) => d && NOTE_ID.test(String(d.id)) && d.S && Array.isArray(d.S.jots))
+    .map((d) => ({
+      id: d.id,
+      created: d.created || 0,
+      updated: d.updated || 0,
+      jots: d.S.jots.map((j) => ({ id: String(j.id), text: String(j.text || ''), kind: j.kind || '' })),
+    })),
+);
+ipcMain.handle('notes:load', (_e, id) => readJSON(notePath(id), null));
+ipcMain.on('notes:save', (_e, id, text) => writeText(notePath(id), text));
+ipcMain.on('notes:flush', (e, id, text) => {
+  try {
+    writeText(notePath(id), text);
+  } finally {
+    e.returnValue = true;
+  }
+});
+// a deleted note moves to notes/.trash instead of disappearing
+ipcMain.handle('notes:remove', (_e, id) => {
+  const file = notePath(id);
+  if (fs.existsSync(file)) {
+    fs.mkdirSync(path.join(notesDir(), '.trash'), { recursive: true });
+    fs.renameSync(file, path.join(notesDir(), '.trash', `${id}.json`));
+  }
+  return true;
 });
 
 if (!app.requestSingleInstanceLock()) {
@@ -204,8 +323,11 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', summon);
   app.whenReady().then(() => {
+    loadPrefs();
+    migrate();
+    summonOk = registerSummon(prefs.keys.summon[0]);
+    buildMenu();
     createWindow();
-    buildMenu(registerSummon());
     app.on('activate', () => {
       if (win) win.show();
       else createWindow();
